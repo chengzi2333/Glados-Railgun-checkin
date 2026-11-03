@@ -8,8 +8,9 @@ on:
       - 'README.md'
       - 'imgs/**'
   schedule:
-    - cron: '18 9,12 * * *'
-      timezone: 'Asia/Shanghai'
+    # GitHub 的 cron 一律按 UTC 解析：01:07 UTC = 北京时间 09:07
+    # 错开整点（00 分）是因为整点是 GitHub 调度最拥挤的时段，容易被延迟
+    - cron: '7 1 * * *'
 
 jobs:
   build:

@@ -579,8 +579,11 @@ class FeishuBackend(PushBackend):
 
     CONSOLE_URL = "https://glados.cloud/console/checkin"
 
-    # 与 .github/workflows/gladosCheck.yml 的 cron（UTC 09:18 / 12:18）对应
-    SCHEDULE_HINT = "每日 17:18 / 20:18 自动签到"
+    # 与 .github/workflows/gladosCheck.yml 的 cron（UTC 01:07）对应
+    SCHEDULE_HINT = "每日 09:07 自动签到"
+
+    # 群机器人无法直接取成员 open_id，用 @所有人 触发提醒（单人群等价于 @自己）
+    MENTION = "<at id=all></at>"
 
     def __init__(self, webhook: str, secret: str = ""):
         self.webhook = webhook
@@ -659,7 +662,10 @@ class FeishuBackend(PushBackend):
         if not rows:
             elements.append({
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": payload.get("note") or title.lstrip("# ")},
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"{self.MENTION} {payload.get('note') or title.lstrip('# ')}",
+                },
             })
         else:
             elements.append({
@@ -667,7 +673,7 @@ class FeishuBackend(PushBackend):
                 "text": {
                     "tag": "lark_md",
                     "content": (
-                        f"成功 **{payload.get('success', 0)}**　·　"
+                        f"{self.MENTION} 成功 **{payload.get('success', 0)}**　·　"
                         f"失败 **{payload.get('fail', 0)}**　·　"
                         f"重复 **{payload.get('repeat', 0)}**"
                     ),
@@ -757,7 +763,7 @@ class FeishuBackend(PushBackend):
         logger.warning(f"{LogEmoji.WARNING} [{self.name}] 卡片发送失败，回退纯文本")
         return self._post({
             "msg_type": "text",
-            "content": {"text": f"{title}\n{self._render(payload)}"},
+            "content": {"text": f"{self.MENTION} {title}\n{self._render(payload)}"},
         })
 
 
