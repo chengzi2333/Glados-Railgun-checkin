@@ -63,6 +63,7 @@
 
 - **PushDeer**：添加 `repository secret` 命名为 `PUSHDEER_SENDKEY`，其值对应 PushDeer key（[获取地址](https://www.pushdeer.com/product.html)）。
 - **Server酱**：添加 `repository secret` 命名为 `SERVERCHAN_SENDKEY`，其值对应 Server酱 SendKey（[获取地址](https://sct.ftqq.com/)）。
+- **飞书**：在飞书群中添加「自定义机器人」，添加 `repository secret` 命名为 `FEISHU_WEBHOOK`，值为机器人 Webhook 地址（形如 `https://open.feishu.cn/open-apis/bot/v2/hook/xxx`）；若安全设置选了「签名校验」，再添加 `FEISHU_SECRET` 为对应密钥。
 
 ### Star 本仓库
 
@@ -74,6 +75,7 @@
 - **2026-04**: 优化代码逻辑与日志输出，支持[新版域名](https://railgun.info)，在 `GLADOS_COOKIES` 中添加新版域名下的 cookies 即可使用。
 - **2026-09**: 设备平台自适应重试（无需手动配置 UA 即可自动恢复签到）；网络层自动重试与退避，降低 CI 网络抖动导致的误报失败；日志时间统一为北京时间，定时任务调整为北京时间每天 2 次并避开整点高峰；默认关闭自动兑换，需显式配置后才启用。
 - **2026-10**: 日志级别短标签 `[I]/[W]/[E]` ；推送兼容 Server酱（策略模式多后端「都发」），新增 `requirements.txt` 。
+- **2026-11**: 推送兼容飞书自定义机器人（支持签名校验）。
 
 ## 问题排查与定位
 
