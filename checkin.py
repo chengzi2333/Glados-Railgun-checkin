@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -572,27 +573,170 @@ class ServerChanBackend(PushBackend):
 
 
 class FeishuBackend(PushBackend):
-    """飞书自定义机器人（Webhook），支持可选的签名校验"""
+    """飞书自定义机器人（Webhook）：卡片消息 + 可选签名校验"""
 
     name = "飞书"
+
+    CONSOLE_URL = "https://glados.cloud/console/checkin"
+
+    # 与 .github/workflows/gladosCheck.yml 的 cron（UTC 09:18 / 12:18）对应
+    SCHEDULE_HINT = "每日 17:18 / 20:18 自动签到"
 
     def __init__(self, webhook: str, secret: str = ""):
         self.webhook = webhook
         self.secret = secret
 
-    def send(self, title: str, payload: dict) -> bool:
-        body = {
-            "msg_type": "text",
-            "content": {"text": f"{title}\n{self._render(payload)}"},
+    # ---------- 卡片构建 ----------
+
+    @staticmethod
+    def _status_style(payload: dict) -> Tuple[str, str, str]:
+        """根据结果返回 (header 颜色, emoji, 状态文案)"""
+        fail = int(payload.get("fail") or 0)
+        repeat = int(payload.get("repeat") or 0)
+        success = int(payload.get("success") or 0)
+
+        if fail and not (success or repeat):
+            return "red", "❌", "签到失败"
+        if fail:
+            return "orange", "⚠️", "部分账号失败"
+        if success:
+            return "green", "✅", "签到成功"
+        if repeat:
+            return "blue", "🔄", "今日已签到"
+        return "grey", "ℹ️", "任务已执行"
+
+    @staticmethod
+    def _metric_tiles(row: dict) -> dict:
+        """一行三块的指标区：今日 / 总分 / 剩余天数"""
+
+        def tile(value, label: str) -> dict:
+            return {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "vertical_align": "top",
+                "elements": [{
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"**{value}**\n{label}"},
+                }],
+            }
+
+        try:
+            gained = int(row.get("points") or 0)
+        except (TypeError, ValueError):
+            gained = 0
+
+        return {
+            "tag": "column_set",
+            "flex_mode": "none",
+            "horizontal_spacing": "default",
+            "columns": [
+                tile(f"+{gained}" if gained > 0 else "0", "今日积分"),
+                tile(row.get("points_total", "-"), "总积分"),
+                tile(row.get("days", "-"), "剩余天数"),
+            ],
         }
+
+    @staticmethod
+    def _now_beijing() -> str:
+        return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+
+    def _build_card(self, title: str, payload: dict) -> dict:
+        color, emoji, status_text = self._status_style(payload)
+        rows = payload.get("rows") or []
+
+        header_title = f"{emoji} GLaDOS {status_text}"
+        if len(rows) == 1:
+            try:
+                gained = int(rows[0].get("points") or 0)
+            except (TypeError, ValueError):
+                gained = 0
+            if gained > 0:
+                header_title += f" · +{gained} 积分"
+
+        elements: List[dict] = []
+
+        if not rows:
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": payload.get("note") or title.lstrip("# ")},
+            })
+        else:
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"成功 **{payload.get('success', 0)}**　·　"
+                        f"失败 **{payload.get('fail', 0)}**　·　"
+                        f"重复 **{payload.get('repeat', 0)}**"
+                    ),
+                },
+            })
+
+            for row in rows:
+                elements.append({"tag": "hr"})
+                elements.append({
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"{row.get('emoji', '')} **{row.get('status', '')}**　`{row.get('domain', '')}`",
+                    },
+                })
+                elements.append(self._metric_tiles(row))
+                if row.get("exchange"):
+                    elements.append({
+                        "tag": "div",
+                        "text": {"tag": "lark_md", "content": f"🎁 {row['exchange']}"},
+                    })
+
+            if int(payload.get("fail") or 0) > 0:
+                elements.append({"tag": "hr"})
+                elements.append({
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": "**先别连续重跑**：反复触发更容易被风控。建议隔天再试，或重新抓一次电脑端 Cookie。",
+                    },
+                })
+
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "action",
+            "actions": [{
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "打开 GLaDOS 控制台"},
+                "type": "primary" if color == "green" else "default",
+                "url": self.CONSOLE_URL,
+            }],
+        })
+        elements.append({
+            "tag": "note",
+            "elements": [{
+                "tag": "plain_text",
+                "content": f"{self._now_beijing()}　·　{self.SCHEDULE_HINT}",
+            }],
+        })
+
+        return {
+            "config": {"wide_screen_mode": True, "enable_forward": True},
+            "header": {
+                "template": color,
+                "title": {"tag": "plain_text", "content": header_title},
+            },
+            "elements": elements,
+        }
+
+    # ---------- 发送 ----------
+
+    def _post(self, body: dict) -> bool:
         if self.secret:
             timestamp = str(int(time.time()))
             string_to_sign = f"{timestamp}\n{self.secret}"
             sign = base64.b64encode(
                 hmac.new(string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
             ).decode("utf-8")
-            body["timestamp"] = timestamp
-            body["sign"] = sign
+            body = {**body, "timestamp": timestamp, "sign": sign}
 
         try:
             resp = requests.post(self.webhook, json=body, timeout=15)
@@ -605,6 +749,16 @@ class FeishuBackend(PushBackend):
         except Exception as e:
             logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: {e}")
             return False
+
+    def send(self, title: str, payload: dict) -> bool:
+        if self._post({"msg_type": "interactive", "card": self._build_card(title, payload)}):
+            return True
+        # 卡片被拒（如客户端/权限不支持）时回退纯文本，保证通知不丢
+        logger.warning(f"{LogEmoji.WARNING} [{self.name}] 卡片发送失败，回退纯文本")
+        return self._post({
+            "msg_type": "text",
+            "content": {"text": f"{title}\n{self._render(payload)}"},
+        })
 
 
 class PushService:
