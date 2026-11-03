@@ -63,7 +63,7 @@
 
 - **PushDeer**：添加 `repository secret` 命名为 `PUSHDEER_SENDKEY`，其值对应 PushDeer key（[获取地址](https://www.pushdeer.com/product.html)）。
 - **Server酱**：添加 `repository secret` 命名为 `SERVERCHAN_SENDKEY`，其值对应 Server酱 SendKey（[获取地址](https://sct.ftqq.com/)）。
-- **飞书**：在飞书群中添加「自定义机器人」，添加 `repository secret` 命名为 `FEISHU_WEBHOOK`，值为机器人 Webhook 地址（形如 `https://open.feishu.cn/open-apis/bot/v2/hook/xxx`）；若安全设置选了「签名校验」，再添加 `FEISHU_SECRET` 为对应密钥。
+- **飞书**：在飞书群中添加「自定义机器人」，添加 `repository secret` 命名为 `FEISHU_WEBHOOK`，值为机器人 Webhook 地址（形如 `https://open.feishu.cn/open-apis/bot/v2/hook/xxx`）；若安全设置选了「签名校验」，再添加 `FEISHU_SECRET` 为对应密钥。推送内容为消息卡片（按签到结果配色，展示今日积分 / 总积分 / 剩余天数），卡片发送失败时自动回退为纯文本。
 
 ### Star 本仓库
 
