@@ -2,6 +2,15 @@ name: auto check
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: '运行模式（backup = 静默补偿，只有真正签到成功才推送）'
+        required: false
+        default: 'normal'
+        type: choice
+        options:
+          - normal
+          - backup
   push:
     branches: [ master ]
     paths-ignore:
@@ -11,6 +20,8 @@ on:
     # GitHub 的 cron 一律按 UTC 解析：01:07 UTC = 北京时间 09:07
     # 错开整点（00 分）是因为整点是 GitHub 调度最拥挤的时段，容易被延迟
     - cron: '7 1 * * *'
+    # 10:30 补偿跑：只有当天确实没签上、这次补签成功时才推送
+    - cron: '30 2 * * *'
 
 jobs:
   build:
@@ -55,7 +66,8 @@ jobs:
         FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
         GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
         GLADOS_EXCHANGE_PLAN: ${{ secrets.GLADOS_EXCHANGE_PLAN }}
-        GLADOS_VERBOSE: ${{ secrets.GLADOS_VERBOSE }}
+        # workflow_dispatch 手动指定优先；定时任务按 cron 判断是否是 10:30 的补偿跑
+        CHECKIN_MODE: ${{ inputs.mode || (github.event.schedule == '30 2 * * *' && 'backup' || 'normal') }}
 
     - name: Keep alive
       uses: liskin/gh-workflow-keepalive@v1 

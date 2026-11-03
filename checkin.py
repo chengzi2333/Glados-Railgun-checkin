@@ -109,6 +109,10 @@ class Config:
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
     ENV_VERBOSE = "GLADOS_VERBOSE"
+    ENV_MODE = "CHECKIN_MODE"
+
+    """默认运行模式（normal = 正常推送；backup = 补偿跑，只在真正签到成功时推送）"""
+    DEFAULT_MODE = "normal"
 
     """默认兑换计划（none 表示不自动兑换）"""
     DEFAULT_EXCHANGE_PLAN = "none"
@@ -134,7 +138,12 @@ class Config:
         self.cookies_list: List[str] = []
         self.exchange_plan: str = self.DEFAULT_EXCHANGE_PLAN
         self.verbose: bool = self.DEFAULT_VERBOSE
+        self.mode: str = self.DEFAULT_MODE
         self._load_config()
+
+    @property
+    def is_backup(self) -> bool:
+        return self.mode == "backup"
 
     def _load_config(self) -> None:
         """加载配置"""
@@ -145,6 +154,7 @@ class Config:
         raw_cookies_env: Optional[str] = os.environ.get(self.ENV_COOKIES)
         exchange_plan_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_PLAN)
         verbose_env: Optional[str] = os.environ.get(self.ENV_VERBOSE)
+        mode_env: Optional[str] = os.environ.get(self.ENV_MODE)
 
         if not push_key_env:
             logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_PUSH_KEY}' 未设置。")
@@ -188,7 +198,7 @@ class Config:
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_FEISHU_WEBHOOK} {'已设置' if self.feishu_webhook else '未设置'}。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_EXCHANGE_PLAN}: {self.exchange_plan}。")
 
-        if verbose_env is not None:
+        if verbose_env:
             verbose_env_lower = verbose_env.lower()
             if verbose_env_lower in ["true", "1", "yes", "y"]:
                 self.verbose = True
@@ -197,7 +207,10 @@ class Config:
             else:
                 logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_VERBOSE}' 的值 '{verbose_env}' 无效，将使用默认值 {self.DEFAULT_VERBOSE}。")
 
-        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_VERBOSE}: {self.verbose}。")
+        if mode_env and mode_env.lower() in ("normal", "backup"):
+            self.mode = mode_env.lower()
+
+        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_VERBOSE}: {self.verbose}，{self.ENV_MODE}: {self.mode}。")
 
 
 # 各平台合法 User-Agent（版本号无关，仅平台 token 关键）
@@ -579,8 +592,8 @@ class FeishuBackend(PushBackend):
 
     CONSOLE_URL = "https://glados.cloud/console/checkin"
 
-    # 与 .github/workflows/gladosCheck.yml 的 cron（UTC 01:07）对应
-    SCHEDULE_HINT = "每日 09:07 自动签到"
+    # 与 .github/workflows/gladosCheck.yml 的 cron（UTC 01:07 / 02:30）对应
+    SCHEDULE_HINT = "每日 09:07 自动签到（10:30 补偿）"
 
     # 群机器人无法直接取成员 open_id，用 @所有人 触发提醒（单人群等价于 @自己）
     MENTION = "<at id=all></at>"
@@ -704,6 +717,12 @@ class FeishuBackend(PushBackend):
                         "tag": "lark_md",
                         "content": "**先别连续重跑**：反复触发更容易被风控。建议隔天再试，或重新抓一次电脑端 Cookie。",
                     },
+                })
+
+            if payload.get("note"):
+                elements.append({
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"ℹ️ {payload['note']}"},
                 })
 
         elements.append({"tag": "hr"})
@@ -912,6 +931,13 @@ class Checker:
 logger = init_logger()
 
 
+def should_push(config, payload: dict) -> bool:
+    """补偿跑只在真正签到成功时推送，避免一天收到两条重复通知"""
+    if config is not None and getattr(config, "is_backup", False):
+        return int(payload.get("success") or 0) > 0
+    return True
+
+
 def main():
     """主函数"""
     exit_code = 0
@@ -929,6 +955,8 @@ def main():
 
             logger.info(f"{LogEmoji.START} 步骤 3: 格式化结果")
             payload = checker.format_results()
+            if config.is_backup:
+                payload["note"] = "本次为 10:30 补偿运行"
             logger.info(f"\n{LogEmoji.END} ========== 签到总结 ==========\n{payload['title']}\n{render_payload(payload)}")
 
     except Exception as e:
@@ -937,8 +965,12 @@ def main():
         exit_code = 1
 
     logger.info(f"{LogEmoji.START} 步骤 4: 发送推送")
-    push_service = PushService(config if "config" in locals() else None)
-    push_service.send(payload["title"], payload)
+    active_config = config if "config" in locals() else None
+    if should_push(active_config, payload):
+        push_service = PushService(active_config)
+        push_service.send(payload["title"], payload)
+    else:
+        logger.info(f"{LogEmoji.INFO} 补偿运行：本次没有新的签到成功，保持静默（不推送）")
     logger.info(f"{LogEmoji.END} 签到完成")
 
     if exit_code != 0:
