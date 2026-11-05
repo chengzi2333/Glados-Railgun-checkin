@@ -37,6 +37,7 @@ class APIEndpoint(Enum):
     """API端点"""
 
     CHECKIN = "/api/user/checkin"
+    CHALLENGE = "/api/user/checkin/challenge"
     STATUS = "/api/user/status"
     POINTS = "/api/user/points"
     EXCHANGE = "/api/user/exchange"
@@ -227,9 +228,15 @@ class API:
     """API 调用"""
 
     CHECKIN_URL = APIEndpoint.CHECKIN.value
+    CHALLENGE_URL = APIEndpoint.CHALLENGE.value
     STATUS_URL = APIEndpoint.STATUS.value
     POINTS_URL = APIEndpoint.POINTS.value
     EXCHANGE_URL = APIEndpoint.EXCHANGE.value
+
+    # 2026 新版签到校验：先取 nonce，等待至少 2.5 秒后提交
+    # SHA256(nonce + "." + PROOF_SALT)，缺少这一步服务端仍返回成功但只给最低积分
+    PROOF_SALT = "glados-observe-v1"
+    PROOF_MIN_DELAY = 2.6
 
     def __init__(self, domain: str, cookie_index: int = 0, verbose: bool = False):
         self.domain: str = domain
@@ -325,16 +332,43 @@ class API:
         """获取签到数据"""
         return {"token": self.domain}
 
+    def _solve_challenge(self, cookies: str, user_agent: str) -> Dict[str, str]:
+        """获取并求解 2026 版签到挑战；失败时返回空字典（不阻断签到）"""
+        url = self._get_full_url(self.CHALLENGE_URL)
+        started = time.time()
+        response = self._make_request(url, "GET", cookies=cookies, user_agent=user_agent)
+        if not response:
+            return {}
+        try:
+            data = response.json()
+        except ValueError:
+            return {}
+
+        nonce = data.get("nonce")
+        if data.get("code") != CheckinStatus.SUCCESS.value or not nonce:
+            self._log("warning", LogEmoji.WARNING, f"签到挑战获取失败，回退旧协议: {data}")
+            return {}
+
+        # 服务端要求提交前至少"观察"2.5 秒，否则按低可信处理
+        wait_for = self.PROOF_MIN_DELAY
+        elapsed = time.time() - started
+        if elapsed < wait_for:
+            time.sleep(wait_for - elapsed)
+
+        proof = hashlib.sha256(f"{nonce}.{self.PROOF_SALT}".encode()).hexdigest()
+        return {"nonce": nonce, "proof": proof}
+
     @log_method
     def checkin(self, cookies: str) -> Dict[str, Union[str, CheckinStatus]]:
-        """执行签到，含设备平台自适应重试"""
+        """执行签到，含挑战校验与设备平台自适应重试"""
         url = self._get_full_url(self.CHECKIN_URL)
-        checkin_data = self._get_checkin_data()
+        base_data = self._get_checkin_data()
 
         # 起始 UA 优先复用已学得的设备 UA，否则用会话默认 UA
         start_ua = self._device_ua_cache.get("_last") or self.headers.get("user-agent")
 
-        raw = self._checkin_attempt(url, checkin_data, cookies, start_ua)
+        proof = self._solve_challenge(cookies, start_ua)
+        raw = self._checkin_attempt(url, {**base_data, **proof}, cookies, start_ua)
 
         # 设备不匹配(code 4)时按服务端 loginDevice 切换 UA 重试一次
         if raw is not None and raw.get("code") == 4 and raw.get("reason") == "device-mismatch":
@@ -342,7 +376,17 @@ class API:
             recover_ua = self._device_ua_cache.get(login_device) or PLATFORM_UA.get(login_device)
             if recover_ua and recover_ua != start_ua:
                 self._log("warning", LogEmoji.WARNING, f"设备平台不匹配 (loginDevice={login_device})，切换 UA 重试", force=True)
-                raw = self._checkin_attempt(url, checkin_data, cookies, recover_ua)
+                proof = self._solve_challenge(cookies, recover_ua)
+                raw = self._checkin_attempt(url, {**base_data, **proof}, cookies, recover_ua)
+
+        # proof 被拒时回退旧协议，保证当天不会因此漏签
+        if proof and raw is not None and raw.get("code") not in (
+            CheckinStatus.SUCCESS.value,
+            CheckinStatus.REPEAT.value,
+            4,
+        ):
+            self._log("warning", LogEmoji.WARNING, f"带 proof 的签到被拒(code={raw.get('code')})，回退旧协议重试", force=True)
+            raw = self._checkin_attempt(url, base_data, cookies, start_ua)
 
         return self._parse_checkin(raw)
 
@@ -442,9 +486,14 @@ class API:
             self._log("warning", LogEmoji.WARNING, "获取状态失败")
             return "None 天", -2
 
+    @staticmethod
+    def _today_beijing() -> str:
+        """北京时间的今天日期（GLaDOS 积分明细用 YYYY-MM-DD）"""
+        return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+
     @log_method
-    def get_points(self, cookies: str) -> Tuple[str, int]:
-        """获取积分"""
+    def get_points(self, cookies: str) -> Tuple[str, int, int]:
+        """获取积分，同时返回今日签到的实际到账积分（明细口径）"""
         url = self._get_full_url(self.POINTS_URL)
         response = self._make_request(url, "GET", cookies=cookies)
 
@@ -452,19 +501,28 @@ class API:
             data = response.json()
             code = data.get("code", -2)
             points = data.get("points", None)
+            today = self._today_beijing()
+            today_gain = 0
+            for item in data.get("history") or []:
+                if item.get("business") != "system:checkin" or item.get("detail") != today:
+                    continue
+                try:
+                    today_gain += int(float(item.get("change") or 0))
+                except (TypeError, ValueError):
+                    continue
 
             if points is not None:
                 points_int = int(float(points))
                 self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, points : {points_int} 积分}}")
                 points_str = f"{points_int} 积分"
                 points_num = points_int
-                return points_str, points_num
+                return points_str, points_num, today_gain
             else:
                 self._log("info", LogEmoji.FAIL, f"{{ code : {code}, points : {points} 积分}}")
-                return "None 积分", 0
+                return "None 积分", 0, today_gain
         else:
             self._log("warning", LogEmoji.WARNING, "获取积分失败")
-            return "None 积分", 0
+            return "None 积分", 0, 0
 
     @log_method
     def exchange(self, cookies: str, plan: str, required_points: int) -> str:
@@ -869,8 +927,11 @@ class Checker:
             result.code = checkin_result.get("code", CheckinStatus.FAILURE)
 
             self._log(cookie_idx, domain, LogEmoji.POINTS, "查询总积分")
-            points_str, points_num = api.get_points(cookie)
+            points_str, points_num, today_gain = api.get_points(cookie)
             result.points_total = points_str
+            # 签到接口的 points 字段可能为 0，但明细里已实际到账，以明细为准
+            if result.code == CheckinStatus.SUCCESS and today_gain > 0:
+                result.points = str(today_gain)
 
             if self.config.exchange_plan in self.config.EXCHANGE_PLANS:
                 required_points = self.config.EXCHANGE_PLANS[self.config.exchange_plan]
