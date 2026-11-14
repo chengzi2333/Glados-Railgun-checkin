@@ -1,4 +1,4 @@
-name: auto check
+name: GLaDOS Check-in
 
 on:
   workflow_dispatch:
@@ -15,19 +15,29 @@ on:
     branches: [ master ]
     paths-ignore:
       - 'README.md'
+      - 'CODEMAP.md'
       - 'imgs/**'
   schedule:
-    # GitHub 的 cron 一律按 UTC 解析：01:07 UTC = 北京时间 09:07
-    # 错开整点（00 分）是因为整点是 GitHub 调度最拥挤的时段，容易被延迟
-    - cron: '7 1 * * *'
-    # 10:30 补偿跑：只有当天确实没签上、这次补签成功时才推送
-    - cron: '30 2 * * *'
+    # 两条 cron 分开写：只有分开，github.event.schedule 才能区分主跑与补偿跑
+    # timezone 让 cron 按北京时间解析（09:18 主跑 / 12:18 补偿）；等价 UTC 为 01:18 / 04:18
+    - cron: '18 9 * * *'
+      timezone: 'Asia/Shanghai'
+    - cron: '18 12 * * *'
+      timezone: 'Asia/Shanghai'
+
+# 定时与手动触发可能重叠：同一时间只保留一个运行，避免重复签到与重复推送
+concurrency:
+  group: glados-checkin
+  cancel-in-progress: false
 
 jobs:
   build:
-    name: glados/railgun checkin
+    name: glados checkin
     runs-on: ubuntu-latest
-      
+
+    # 脚本自带 5 分钟运行预算；这里再兜底，避免异常情况卡住
+    timeout-minutes: 15
+
     permissions:
       contents: read
       actions: write
@@ -36,7 +46,7 @@ jobs:
       matrix:
         python-version: [3.13]
 
-    # 这里加入全局环境变量，强制后续所有第三方 actions 兼容 Node.js 24 运行环境
+    # 强制后续所有第三方 actions 兼容 Node.js 24 运行环境
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -66,12 +76,12 @@ jobs:
         FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
         GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
         GLADOS_EXCHANGE_PLAN: ${{ secrets.GLADOS_EXCHANGE_PLAN }}
-        # workflow_dispatch 手动指定优先；定时任务按 cron 判断是否是 10:30 的补偿跑
-        CHECKIN_MODE: ${{ inputs.mode || (github.event.schedule == '30 2 * * *' && 'backup' || 'normal') }}
+        # workflow_dispatch 手动指定优先；12:18 的定时任务自动降级为补偿跑
+        CHECKIN_MODE: ${{ inputs.mode || (github.event.schedule == '18 12 * * *' && 'backup' || 'normal') }}
 
     - name: Keep alive
-      uses: liskin/gh-workflow-keepalive@v1 
-        
+      uses: liskin/gh-workflow-keepalive@v1
+
     - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@v2
       with:
